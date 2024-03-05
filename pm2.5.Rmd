@@ -1,0 +1,338 @@
+---
+title: "Untitled"
+author: "zy"
+date: "2/13/2024"
+output: html_document
+---
+
+```{r}
+library(tidyverse)
+library(rvest)
+library(httr)
+library(readxl)
+library(haven)
+library(stringr)
+library(dplyr)
+library(gstat)
+library(imputeTS)
+```
+
+#Calculate simple average for pm2.5
+```{r}
+list1_2023 <- read_excel("C:/Users/studentlab/Desktop/list1_2023.xlsx", skip = 2)%>% janitor::clean_names()%>%
+  mutate(code=paste(fips_state_code,fips_county_code,sep=""))%>%
+  select(cbsa_code,cbsa_title,code)
+
+files.list<-list.files(file.path("C:/Users/studentlab/Desktop/pm2.5"),full.names = TRUE)
+
+PM2.5<-lapply(files.list,function(file){
+  read.csv(file)%>%
+  mutate(FIPS=as.character(FIPS))%>%
+  mutate(code=as.numeric(substr(FIPS,1,5)))%>%
+  merge(.,list1_2023,by="code")
+})
+
+PM2.5<-lapply(PM2.5,function(data){
+  data%>%
+  group_by(cbsa_code,cbsa_title,Date)%>%
+    summarize(pm2.5=mean(pm25_daily_average.ug.m3.))
+})
+
+output_dir <- "C:/Users/studentlab/Desktop/pm2.5 2002-2020/"
+
+# Iterate over the list of data frames
+for (i in seq_along(PM2.5)) {
+  # Generate the file name dynamically based on the index
+  file_name <- paste0("pm2.5_", i+2001, ".csv")
+  
+  # Construct the full file path
+  file_path <- file.path(output_dir, file_name)
+  
+  # Write the data frame to CSV
+  write.csv(PM2.5[[i]], file = file_path, row.names = FALSE)
+}
+
+```
+
+
+```{r}
+
+files.list<-list.files(file.path("C:/Users/studentlab/Desktop/pm2.5_20152016"),full.names = TRUE)
+
+PM2.5<-lapply(files.list,function(file){
+  read.csv(file)%>%
+  mutate(FIPS=as.character(Loc_Label1))%>%
+  mutate(code=as.numeric(substr(Loc_Label1,1,5)))%>%
+  merge(.,list1_2023,by="code")
+})
+
+PM2.5<-lapply(PM2.5,function(data){
+  data%>%
+  group_by(cbsa_code,cbsa_title,Date)%>%
+    summarize(pm2.5=mean(Prediction))
+})
+
+output_dir <- "C:/Users/studentlab/Desktop/pm2.5 2002-2020/"
+
+# Iterate over the list of data frames
+for (i in seq_along(PM2.5)) {
+  # Generate the file name dynamically based on the index
+  file_name <- paste0("pm2.5_", i+2014, ".csv")
+  
+  # Construct the full file path
+  file_path <- file.path(output_dir, file_name)
+  
+  # Write the data frame to CSV
+  write.csv(PM2.5[[i]], file = file_path, row.names = FALSE)
+}
+```
+
+
+#Calculate the PM2.5 weighted by population
+
+#First import population data from 5-year ACS,2007-2009 is using interpolated data
+```{r}
+population<- read_sas("C:/Users/studentlab/Desktop/nhgis0002_ts_nominal_tract.sas7bdat")
+
+population=
+  population%>%
+  mutate(state_code=substr(NHGISCODE,2,3),county_code=substr(NHGISCODE,5,7),census_tract_code=substr(NHGISCODE,9,14))%>%
+  mutate(FIPS=paste(state_code,county_code,census_tract_code,sep=""))%>%
+  select(state_code,county_code,census_tract_code,FIPS,AV0AA2010,AV0AA105,AV0AA115,AV0AA125,AV0AA135,AV0AA145,AV0AA155,AV0AA165,AV0AA175,AV0AA185,AV0AA195,AV0AA205)
+
+```
+
+```{r}
+population=
+  population%>%
+  select(-AV0AA2010)%>%
+  rename("2010"=AV0AA105,"2011"=AV0AA115,"2012"=AV0AA125,"2013"=AV0AA135,"2014"=AV0AA145,"2015"=AV0AA155,"2016"=AV0AA165,"2017"=AV0AA175,"2018"=AV0AA185,"2019"=AV0AA195,"2020"=AV0AA205)%>%
+  mutate("2007"=NA,"2008"=NA,"2009"=NA)%>%
+  pivot_longer(cols=starts_with("20"),names_to="year",values_to="population")
+
+
+interpolate_ts <- function(data, variable, location = "FIPS", time_var = "year") {
+  data <- select(data, variable, location, time_var)
+  for (i in unique(data[[location]])) {
+    small_set <- data[data[[location]] == i,]
+    missing_vals <- which(is.na(small_set[[variable]])) # list position of missing values
+    known_vals <- which(!is.na(small_set[[variable]])) # list position of known values
+    if (length(known_vals) == 0 | length(missing_vals) ==  0) {
+      # if all known or all missing, skip
+      next
+    }
+    if (length(known_vals) == 1) {
+      small_set[[variable]][is.na(small_set[[variable]])] <- small_set[[variable]][known_vals[1]]
+    }
+    else {
+      new_vals <- na_ma(small_set[[variable]])
+      small_set[[variable]][is.na(small_set[[variable]])] <- new_vals[is.na(small_set[[variable]])]
+    }
+    data[[variable]][data[[location]] == i] <- small_set[[variable]]
+  }
+  
+  return(data[[variable]])
+}
+
+
+population$interpolated_population<-interpolate_ts(data=population,variable="population",location = "FIPS",time_var="year")
+write.csv(population, file ="/Users/huanglp/Desktop/population.csv", row.names = FALSE)
+```
+
+#Calculate weighted pm2.5 for year 2007-2014
+```{r}
+population<-read.csv("/Users/huanglp/Desktop/population.csv")%>%
+  mutate(code=substr(FIPS,1,nchar(FIPS)-6))
+
+list1_2023 <- read_excel("/Users/huanglp/Desktop/list1_2023.xlsx", skip = 2)%>% janitor::clean_names()%>%
+  mutate(code=paste(fips_state_code,fips_county_code,sep=""))%>%
+  select(cbsa_code,cbsa_title,code)
+
+files.list<-list.files(file.path("/Users/huanglp/Desktop/pm2.5 2007-2010"),full.names = TRUE)
+
+PM2.5_2007<-lapply(files.list,function(file){
+  read.csv(file)%>%
+  mutate(FIPS=as.character(FIPS))%>%
+  mutate(code=as.numeric(substr(FIPS,1,5)))%>%
+  merge(.,list1_2023,by="code")
+})
+
+
+for (i in seq_along(PM2.5_2007)){
+population1<-filter(population,year==i+2006)%>%
+  select(FIPS,interpolated_population)
+PM2.5_2007[[i]]=
+    PM2.5_2007[[i]]%>%
+    mutate(FIPS=as.numeric(FIPS))%>%
+    left_join(.,population1,by="FIPS")
+population_cbsa=
+    PM2.5_2007[[i]]%>%
+    group_by(cbsa_code,Date)%>%
+    summarize(total_population=sum(interpolated_population))
+PM2.5_2007[[i]]=
+    PM2.5_2007[[i]]%>%
+    left_join(.,population_cbsa,by=c("cbsa_code","Date"))%>%
+    mutate(weight=interpolated_population/total_population)%>%
+    mutate(pm2.5_weight=pm25_daily_average.ug.m3.*weight)%>%
+    group_by(cbsa_code,Date,cbsa_title)%>%
+    summarize(pm2.5_average=sum(pm2.5_weight))
+}
+
+
+output_dir <- "/Users/huanglp/Desktop/pm2.5 2007-2020/"
+
+# Iterate over the list of data frames
+for (i in seq_along(PM2.5_2007)) {
+  # Generate the file name dynamically based on the index
+  file_name <- paste0("pm2.5_", i+2006, ".csv")
+  
+  # Construct the full file path
+  file_path <- file.path(output_dir, file_name)
+  
+  # Write the data frame to CSV
+  write.csv(PM2.5_2007[[i]], file = file_path, row.names = FALSE)
+}
+
+```
+```{r}
+files.list<-list.files(file.path("/Users/huanglp/Desktop/pm2.5 2011-2014"),full.names = TRUE)
+
+PM2.5_2011<-lapply(files.list,function(file){
+  read.csv(file)%>%
+  mutate(FIPS=as.character(FIPS))%>%
+  mutate(code=as.numeric(substr(FIPS,1,5)))%>%
+  merge(.,list1_2023,by="code")
+})
+
+
+for (i in seq_along(PM2.5_2011)){
+population1<-filter(population,year==i+2010)%>%
+  select(FIPS,interpolated_population)
+PM2.5_2011[[i]]=
+    PM2.5_2011[[i]]%>%
+    mutate(FIPS=as.numeric(FIPS))%>%
+    left_join(.,population1,by="FIPS")
+population_cbsa=
+    PM2.5_2011[[i]]%>%
+    group_by(cbsa_code,Date)%>%
+    summarize(total_population=sum(interpolated_population))
+PM2.5_2011[[i]]=
+    PM2.5_2011[[i]]%>%
+    left_join(.,population_cbsa,by=c("cbsa_code","Date"))%>%
+    mutate(weight=interpolated_population/total_population)%>%
+    mutate(pm2.5_weight=pm25_daily_average.ug.m3.*weight)%>%
+    group_by(cbsa_code,Date,cbsa_title)%>%
+    summarize(pm2.5_average=sum(pm2.5_weight))
+}
+
+
+output_dir <- "/Users/huanglp/Desktop/pm2.5 2007-2020/"
+
+# Iterate over the list of data frames
+for (i in seq_along(PM2.5_2011)) {
+  # Generate the file name dynamically based on the index
+  file_name <- paste0("pm2.5_", i+2010, ".csv")
+  
+  # Construct the full file path
+  file_path <- file.path(output_dir, file_name)
+  
+  # Write the data frame to CSV
+  write.csv(PM2.5_2011[[i]], file = file_path, row.names = FALSE)
+}
+```
+
+
+#Calculate weighted pm2.5 for year 2015-2016
+```{r}
+files.list<-list.files(file.path("/Users/huanglp/Desktop/pm2.5 2015-2016"),full.names = TRUE)
+
+PM2.5_2015<-lapply(files.list,function(file){
+  read.csv(file)%>%
+  mutate(FIPS=as.character(Loc_Label1))%>%
+  mutate(code=as.numeric(substr(Loc_Label1,1,5)))%>%
+  merge(.,list1_2023,by="code")
+})
+
+for (i in seq_along(PM2.5_2015)){
+population1<-filter(population,year==i+2014)%>%
+  select(FIPS,interpolated_population)
+PM2.5_2015[[i]]=
+    PM2.5_2015[[i]]%>%
+    mutate(FIPS=as.numeric(FIPS))%>%
+    left_join(.,population1,by="FIPS")
+population_cbsa=
+    PM2.5_2015[[i]]%>%
+    group_by(cbsa_code,Date)%>%
+    summarize(total_population=sum(interpolated_population))
+PM2.5_2015[[i]]=
+    PM2.5_2015[[i]]%>%
+    left_join(.,population_cbsa,by=c("cbsa_code","Date"))%>%
+    mutate(weight=interpolated_population/total_population)%>%
+    mutate(pm2.5_weight=Prediction*weight)%>%
+    group_by(cbsa_code,Date,cbsa_title)%>%
+    summarize(pm2.5_average=sum(pm2.5_weight))
+}
+
+
+output_dir <- "/Users/huanglp/Desktop/pm2.5 2007-2020/"
+
+# Iterate over the list of data frames
+for (i in seq_along(PM2.5_2015)) {
+  # Generate the file name dynamically based on the index
+  file_name <- paste0("pm2.5_", i+2014, ".csv")
+  
+  # Construct the full file path
+  file_path <- file.path(output_dir, file_name)
+  
+  # Write the data frame to CSV
+  write.csv(PM2.5_2015[[i]], file = file_path, row.names = FALSE)
+}
+```
+
+#Calculate weighted pm2.5 for year 2017-2020
+```{r}
+files.list<-list.files(file.path("/Users/huanglp/Desktop/pm2.5 2017-2020"),full.names = TRUE)
+
+PM2.5_2017<-lapply(files.list,function(file){
+  read.csv(file)%>%
+  mutate(FIPS=as.character(FIPS))%>%
+  mutate(code=as.numeric(substr(FIPS,1,5)))%>%
+  merge(.,list1_2023,by="code")
+})
+
+for (i in seq_along(PM2.5_2017)){
+population1<-filter(population,year==i+2016)%>%
+  select(FIPS,interpolated_population)
+PM2.5_2017[[1]]=
+    PM2.5_2017[[1]]%>%
+    mutate(FIPS=as.numeric(FIPS))%>%
+    left_join(.,population1,by="FIPS")
+population_cbsa=
+    PM2.5_2017[[1]]%>%
+    group_by(cbsa_code,Date)%>%
+    summarize(total_population=sum(interpolated_population))
+PM2.5_2017[[1]]=
+    PM2.5_2017[[1]]%>%
+    left_join(.,population_cbsa,by=c("cbsa_code","Date"))%>%
+    mutate(weight=interpolated_population/total_population)%>%
+    mutate(pm2.5_weight=pm25_daily_average.ug.m3.*weight)%>%
+    group_by(cbsa_code,Date,cbsa_title)%>%
+    summarize(pm2.5_average=sum(pm2.5_weight))
+}
+
+
+output_dir <- "/Users/huanglp/Desktop/pm2.5 2007-2020/"
+
+# Iterate over the list of data frames
+for (i in seq_along(PM2.5_2017)) {
+  # Generate the file name dynamically based on the index
+  file_name <- paste0("pm2.5_", i+2016, ".csv")
+  
+  # Construct the full file path
+  file_path <- file.path(output_dir, file_name)
+  
+  # Write the data frame to CSV
+  write.csv(PM2.5_2017[[i]], file = file_path, row.names = FALSE)
+}
+```
+
